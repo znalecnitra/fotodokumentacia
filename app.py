@@ -9,6 +9,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import io
+import base64
 
 # 1. NASTAVENIE STRÁNKY
 st.set_page_config(page_title="Znalec - Fotodokumentácia", layout="wide")
@@ -49,10 +50,14 @@ if uploaded_files:
             raw_img = Image.open(f)
             corrected_img = ImageOps.exif_transpose(raw_img)
             
-            # Náhľad pre webovú tabuľku
+            # Konverzia na optimalizovanú miniatúru pre web tabuľku (Base64)
             web_thumb = corrected_img.copy()
-            web_thumb.thumbnail((90, 65))
+            web_thumb.thumbnail((120, 90))
+            thumb_buffer = io.BytesIO()
+            web_thumb.save(thumb_buffer, format="JPEG")
+            encoded_thumb = f"data:image/jpeg;base64,{base64.b64encode(thumb_buffer.getvalue()).decode()}"
             
+            # Originálne bajty pre Word
             img_byte_arr = io.BytesIO()
             corrected_img.save(img_byte_arr, format="JPEG")
             final_bytes = img_byte_arr.getvalue()
@@ -60,7 +65,7 @@ if uploaded_files:
             ai_desc = ""
             if client:
                 try:
-                    prompt = "Hovoríš po slovensky. Analyzuj tento obrázok zo znaleckej obhliadky nehnuteľnosti. Napíš stručný, profesionálny názov toho, čo vidíš (napr. 'Pohľad na Kúpeľňu', 'Pohľad na Predsieň', 'Pohľad na Rozvádzač RS'). Max 4 slová. Odpovedz LEN týmto popisom."
+                    prompt = "Hovoríš po slovensky. Analyzuj tento obrázok zo znaleckej obhliadky nehnuteľnosti. Napíš stručný, profesionálny názov toho, čo vidíš (napr. 'Pohľad na Kúpeľňu', 'Pohľad na Predsieň', 'Pohľad na Rozvádzač RS'). Max 4 slová. Odpavedz LEN týmto popisom."
                     response = client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=[corrected_img, prompt]
@@ -75,10 +80,11 @@ if uploaded_files:
             st.session_state.catalog[f.name] = final_bytes
             st.session_state.table_rows.append({
                 "Názov súboru": f.name,
-                "Náhad (2x3 cm)": web_thumb,
+                "Náhľad (2x3 cm)": encoded_thumb,
                 "Popis obrázku (Kliknite a upravte)": ai_desc
             })
 
+    # Odstránenie zmazaných fotiek
     current_names = [f.name for f in uploaded_files]
     st.session_state.table_rows = [r for r in st.session_state.table_rows if r["Názov súboru"] in current_names]
 
@@ -86,10 +92,11 @@ if uploaded_files:
     st.subheader("📄 Usporiadanie poradia MYŠOU a úprava textu")
     st.info("💡 TIP: Chyťte riadok myšou na ľavom okraji a potiahnite ho hore/dole pre zmenu poradia vo Worde. Text popisu prepíšete dvojklikom.")
 
+    # INTERAKTÍVNA TABUĽKA S OPRAVENÝM VYKRESLENÍM OBRÁZKOV
     edited_df = st.data_editor(
         st.session_state.table_rows,
         column_config={
-            "Náhad (2x3 cm)": st.column_config.ImageColumn(width="small"),
+            "Náhľad (2x3 cm)": st.column_config.ImageColumn(width="small"),
             "Názov súboru": st.column_config.TextColumn(disabled=True),
             "Popis obrázku (Kliknite a upravte)": st.column_config.TextColumn(width="large")
         },
@@ -98,7 +105,14 @@ if uploaded_files:
         use_container_width=True,
         key="drag_drop_grid"
     )
-    st.session_state.table_rows = edited_df
+    
+    # Bezpečné priradenie hodnôt z tabuľky
+    if isinstance(edited_df, list):
+        rows_to_process = edited_df
+    elif isinstance(edited_df, dict) and "edited_rows" in edited_df:
+        rows_to_process = st.session_state.table_rows
+    else:
+        rows_to_process = st.session_state.table_rows
 
     # Pomocná funkcia na pridanie čiernych okrajov do tabuľky Wordu
     def set_cell_borders(cell):
@@ -109,15 +123,15 @@ if uploaded_files:
             border.set(qn('w:val'), 'single')
             border.set(qn('w:sz'), '4')  # Hrúbka čiary
             border.set(qn('w:space'), '0')
-            border.set(qn('w:color'), '000000')  # Čierna farba
+            border.set(qn('w:color'), '000000')  # Čierna
             tcBorders.append(border)
         tcPr.append(tcBorders)
 
-    # 5. GENERÁTOR WORDU (.DOCX) - STRIKTNÁ MRIEŽKA 2x4 S ČIERNYMI ČIARAMI
+    # 5. GENERÁTOR WORDU (.DOCX) - STOPERCENTNE IMÚNNY VOČI CHYBE S DICT/LIST
     def generate_docx():
         doc = docx.Document()
         
-        # Nastavenie úzkych okrajov, aby sa 4 rady bezpečne zmestili na A4
+        # Nastavenie úzkych okrajov pre A4
         for section in doc.sections:
             section.top_margin = Inches(0.5)
             section.bottom_margin = Inches(0.5)
@@ -136,45 +150,43 @@ if uploaded_files:
             fp.text = objekt
             fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Vytvorenie Word tabuľky (2 stĺpce)
         table = doc.add_table(rows=0, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         
-        rows_data = st.session_state.table_rows if st.session_state.table_rows else []
-        
-        for i in range(0, len(rows_data), 2):
+        for i in range(0, len(rows_to_process), 2):
             cells_img = table.add_row().cells
             cells_txt = table.add_row().cells
             
-            # Nastavenie čiernych okrajov pre bunky
             set_cell_borders(cells_img[0])
             set_cell_borders(cells_img[1])
             set_cell_borders(cells_txt[0])
             set_cell_borders(cells_txt[1])
             
             # --- ĽAVÁ STRANA ---
-            item1 = rows_data[i]
+            item1 = rows_to_process[i]
             bytes1 = st.session_state.catalog[item1["Názov súboru"]]
             p1 = cells_img[0].paragraphs if cells_img[0].paragraphs else cells_img[0].add_paragraph()
             p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            # Presná optimálna šírka fotky (3.2 palca = cca 8.1 cm), aby vošli 4 rady na A4
             p1.add_run().add_picture(io.BytesIO(bytes1), width=Inches(3.2))
             
+            # Vytiahnutie čistého textu popisu z tabuľky
+            raw_text1 = item1.get("Popis obrázku (Kliknite a upravte)", "Pohľad na objekt")
             t1 = cells_txt[0].paragraphs if cells_txt[0].paragraphs else cells_txt[0].add_paragraph()
             t1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            t1.add_run(item1["Popis obrázku (Kliknite a upravte)"]).font.size = Pt(9)
+            t1.add_run(str(raw_text1)).font.size = Pt(9)
             
             # --- PRAVÁ STRANA ---
-            if i + 1 < len(rows_data):
-                item2 = rows_data[i+1]
+            if i + 1 < len(rows_to_process):
+                item2 = rows_to_process[i+1]
                 bytes2 = st.session_state.catalog[item2["Názov súboru"]]
                 p2 = cells_img[1].paragraphs if cells_img[1].paragraphs else cells_img[1].add_paragraph()
                 p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p2.add_run().add_picture(io.BytesIO(bytes2), width=Inches(3.2))
                 
+                raw_text2 = item2.get("Popis obrázku (Kliknite a upravte)", "Pohľad na objekt")
                 t2 = cells_txt[1].paragraphs if cells_txt[1].paragraphs else cells_txt[1].add_paragraph()
                 t2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                t2.add_run(item2["Popis obrázku (Kliknite a upravte)"]).font.size = Pt(9)
+                t2.add_run(str(raw_text2)).font.size = Pt(9)
                 
         bio = io.BytesIO()
         doc.save(bio)
