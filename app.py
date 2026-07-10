@@ -1,6 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
-from PIL import Image
+from PIL import Image, ImageOps
 import docx
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -15,8 +15,11 @@ st.title("📸 Profesionálna Fotodokumentácia pre posudky")
 gemini_key = st.sidebar.text_input("Vložte bezplatný Gemini API kľúč:", type="password")
 
 if gemini_key:
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    try:
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel('gemini-2.5-flash')
+    except Exception as e:
+        st.sidebar.error(f"Chyba konfigurácie AI: {e}")
 else:
     st.warning("🔑 Pre funkciu automatických popisov vložte do bočného panelu váš bezplatný Gemini API kľúč.")
 
@@ -34,46 +37,84 @@ with col3:
 st.subheader("🖼️ Nahrať fotky pre projekt")
 uploaded_files = st.file_uploader("Vyberte alebo potiahnite fotky naraz:", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-# Inicializácia pamäte pre popisy fotiek
-if 'photo_data' not in st.session_state:
-    st.session_state.photo_data = {}
+# Inicializácia relácie a poradia v pamäti
+if 'photo_order' not in st.session_state:
+    st.session_state.photo_order = []
+if 'photo_catalog' not in st.session_state:
+    st.session_state.photo_catalog = {}
 
 if uploaded_files:
-    st.subheader("🔍 Generovanie popisov a úprava textu")
-    
-    # Zoradenie súborov abecedne/podľa času (názvu súboru)
-    sorted_files = sorted(uploaded_files, key=lambda x: x.name)
-    
-    # Načítanie dát
-    for f in sorted_files:
-        if f.name not in st.session_state.photo_data:
-            img = Image.open(f)
+    # Spracovanie nových nahraných súborov
+    for f in uploaded_files:
+        if f.name not in st.session_state.photo_catalog:
+            # Načítanie obrázka a AUTOMATICKÉ OTOČENIE podľa EXIF dát z mobilu
+            raw_img = Image.open(f)
+            corrected_img = ImageOps.exif_transpose(raw_img)
             
+            # Príprava bajtov pre export
+            img_byte_arr = io.BytesIO()
+            corrected_img.save(img_byte_arr, format=raw_img.format if raw_img.format else "JPEG")
+            final_bytes = img_byte_arr.getvalue()
+            
+            # Volanie AI pre skutočný popis (nie iba názov súboru)
+            ai_desc = ""
             if gemini_key:
                 try:
-                    prompt = "Analyzuj tento obrázok zo znaleckej obhliadky nehnuteľnosti. Napíš stručný, profesionálny názov alebo popis toho, čo je na fotke v slovenčine (napr. 'Pohľad na Kúpeľňu', 'Pohľad na Kuchyňu', 'Rozvody v byte', 'Pohľad severo-východný na Bytový dom'). Odpovedz LEN týmto popisom, nič iné nepíš."
-                    response = model.generate_content([prompt, img])
+                    prompt = "Hovoríš po slovensky. Analyzuj tento obrázok zo znaleckej obhliadky nehnuteľnosti. Napíš stručný, jednovetný, profesionálny názov toho, čo presne vidíš (napr. 'Pohľad na bytový dom z exteriéru', 'Vstupný portál a schodisko do bytového domu', 'Pohľad na interiér obývacej izby'). Odpovedz LEN týmto popisom."
+                    response = model.generate_content([prompt, corrected_img])
                     ai_desc = response.text.strip()
-                except Exception as e:
-                    ai_desc = f"Pohľad na {f.name}"
-            else:
-                ai_desc = f"Pohľad na {f.name}"
+                except Exception:
+                    ai_desc = f"Pohľad na objekt ({f.name})"
+            
+            if not ai_desc:
+                ai_desc = f"Pohľad na objekt ({f.name})"
                 
-            st.session_state.photo_data[f.name] = {"image": img, "desc": ai_desc, "bytes": f.getvalue()}
+            # Uloženie do katalógu
+            st.session_state.photo_catalog[f.name] = {
+                "image": corrected_img,
+                "desc": ai_desc,
+                "bytes": final_bytes
+            }
+            if f.name not in st.session_state.photo_order:
+                st.session_state.photo_order.append(f.name)
 
-    # Zobrazenie v stabilnej mriežke 2 stĺpce
-    cols = st.columns(2)
-    for idx, f_name in enumerate(list(st.session_state.photo_data.keys())):
-        data = st.session_state.photo_data[f_name]
-        current_col = cols[idx % 2]
-        with current_col:
-            st.image(data["image"], use_container_width=True)
-            # Každý popis je okamžite upraviteľný
-            new_desc = st.text_input(f"Popis ({f_name}):", value=data["desc"], key=f"input_{f_name}")
-            st.session_state.photo_data[f_name]["desc"] = new_desc
-            st.markdown("---")
+    # Vyčistenie starých súborov, ktoré už užívateľ odobral z uploaderu
+    current_names = [f.name for f in uploaded_files]
+    st.session_state.photo_order = [name for name in st.session_state.photo_order if name in current_names]
 
-    # 5. GENERÁTOR WORDU (.DOCX)
+    st.subheader("🔍 Usporiadanie poradia a úprava textu")
+    
+    # Vykreslenie mriežky s kontrolou poradia (tlačidlá hore/dole)
+    for idx, f_name in enumerate(st.session_state.photo_order):
+        data = st.session_state.photo_catalog[f_name]
+        
+        # Vytvorenie riadku: Fotka | Tlačidlá poradia | Textové pole
+        r_col1, r_col2, r_col3 = st.columns([2, 1, 5])
+        
+        with r_col1:
+            # Kompaktný náhľad na webe (šírka len 300px)
+            st.image(data["image"], width=300)
+            
+        with r_col2:
+            st.write("") # Odsadenie
+            # Tlačidlá na zmenu poradia v zozname
+            if idx > 0:
+                if st.button("🔼 Hore", key=f"up_{f_name}_{idx}"):
+                    st.session_state.photo_order[idx], st.session_state.photo_order[idx-1] = st.session_state.photo_order[idx-1], st.session_state.photo_order[idx]
+                    st.rerun()
+            if idx < len(st.session_state.photo_order) - 1:
+                if st.button("🔽 Dole", key=f"down_{f_name}_{idx}"):
+                    st.session_state.photo_order[idx], st.session_state.photo_order[idx+1] = st.session_state.photo_order[idx+1], st.session_state.photo_order[idx]
+                    st.rerun()
+                    
+        with r_col3:
+            # Editovateľné textové pole pre úpravu popisu
+            new_desc = st.text_area(f"Popis dokumentu ({f_name}):", value=data["desc"], key=f"txt_{f_name}_{idx}")
+            st.session_state.photo_catalog[f_name]["desc"] = new_desc
+            
+        st.markdown("---")
+
+    # 5. GENERÁTOR WORDU (.DOCX) - Kompletne opravený riadok 111
     def generate_docx():
         doc = docx.Document()
         
@@ -84,48 +125,53 @@ if uploaded_files:
             section.left_margin = Inches(0.6)
             section.right_margin = Inches(0.6)
             
-            # Štýl pre hlavičku vo Worde
+            # Fixná hlavička
             header = section.header
-            hp = header.paragraphs[0]
+            hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
             hp.text = f"Znalec: {znalec}\t\tFOTODOKUMENTÁCIA\t\t{datum}"
             hp.alignment = WD_ALIGN_PARAGRAPH.LEFT
             
-            # Štýl pre pätu vo Worde
+            # Fixná päta
             footer = section.footer
-            fp = footer.paragraphs[0]
+            fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
             fp.text = objekt
             fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        # Vytvorenie pevnej mriežky tabuľky (2 stĺpce)
+        # Mriežka tabuľky vo Worde (2 stĺpce)
         table = doc.add_table(rows=0, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         
-        items = list(st.session_state.photo_data.values())
+        # Čítanie dát presne podľa usporiadaného poradia od užívateľa
+        order = st.session_state.photo_order
         
-        for i in range(0, len(items), 2):
+        for i in range(0, len(order), 2):
             row_cells_img = table.add_row().cells
             row_cells_txt = table.add_row().cells
             
-            # Ľavá bunka
-            img_stream1 = io.BytesIO(items[i]["bytes"])
+            # Ľavá strana tabuľky
+            name1 = order[i]
+            item1 = st.session_state.photo_catalog[name1]
+            img_stream1 = io.BytesIO(item1["bytes"])
             p1 = row_cells_img.paragraphs[0]
             p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p1.add_run().add_picture(img_stream1, width=Inches(3.2))
             
             t1 = row_cells_txt.paragraphs[0]
             t1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            t1.add_run(items[i]["desc"]).font.size = Pt(10)
+            t1.add_run(item1["desc"]).font.size = Pt(10)
             
-            # Pravá bunka
-            if i + 1 < len(items):
-                img_stream2 = io.BytesIO(items[i+1]["bytes"])
+            # Pravá strana tabuľky (ak existuje druhá fotka do páru)
+            if i + 1 < len(order):
+                name2 = order[i+1]
+                item2 = st.session_state.photo_catalog[name2]
+                img_stream2 = io.BytesIO(item2["bytes"])
                 p2 = row_cells_img.paragraphs[0]
                 p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p2.add_run().add_picture(img_stream2, width=Inches(3.2))
                 
                 t2 = row_cells_txt.paragraphs[0]
                 t2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                t2.add_run(items[i+1]["desc"]).font.size = Pt(10)
+                t2.add_run(item2["desc"]).font.size = Pt(10)
                 
         bio = io.BytesIO()
         doc.save(bio)
@@ -133,10 +179,13 @@ if uploaded_files:
 
     # TLAČIDLO NA STIAHNUTIE WORDU
     st.subheader("💾 Stiahnuť fotodokumentáciu")
-    docx_data = generate_docx()
-    st.download_button(
-        label="📥 Stiahnuť hotový WORD (.docx) s Hlavičkou a Pätou",
-        data=docx_data,
-        file_name="Fotodokumentacia.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
+    try:
+        docx_data = generate_docx()
+        st.download_button(
+            label="📥 Stiahnuť hotový WORD (.docx) s Hlavičkou a Pätou",
+            data=docx_data,
+            file_name="Fotodokumentacia.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    except Exception as error:
+        st.error(f"Chyba pri príprave dokumentu na stiahnutie: {error}")
